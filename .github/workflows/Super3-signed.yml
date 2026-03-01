@@ -1,0 +1,158 @@
+name: Super3 APK (Signed)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK + NDK + Build Tools + CMake
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.1.0" \
+            "ndk;29.0.14206865" \
+            "cmake;3.30.3"
+
+      - name: Get versionName
+        id: version
+        run: |
+          VERSION=$(grep -m1 'versionName' android/app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "❌ Could not detect versionName from android/app/build.gradle.kts"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Compute next release tag
+        id: tag
+        run: |
+          git fetch --tags
+          BASE="v${{ env.VERSION }}"
+          LAST=$(git tag -l "${BASE}-r*" | sort -V | tail -n 1)
+
+          if [ -z "$LAST" ]; then
+            R=1
+          else
+            R=$(echo "$LAST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
+            if [ -z "$R" ]; then R=1; else R=$((R+1)); fi
+          fi
+
+          TAG="${BASE}-r${R}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Build Release
+        run: |
+          cd android
+          chmod +x gradlew
+          sed -i 's/^DEFAULT_JVM_OPTS=.*/DEFAULT_JVM_OPTS=""/' gradlew || true
+          sed -i 's/\r$//' gradlew || true
+
+          unset _JAVA_OPTIONS
+          unset JAVA_TOOL_OPTIONS
+          unset JAVA_OPTS
+
+          cat > init.gradle <<'EOF'
+          gradle.projectsEvaluated {
+            allprojects { p ->
+              p.tasks.matching { it.class.name == "org.jetbrains.kotlin.gradle.tasks.KotlinCompile" }.all { t ->
+                try { t.kotlinOptions.jvmTarget = "21" } catch (ignored) { }
+              }
+            }
+          }
+          EOF
+
+          ./gradlew -I init.gradle assembleRelease --no-daemon
+
+      - name: Decode keystore (Environment secret)
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > release.keystore
+          test -s release.keystore
+
+      - name: Zipalign + Sign APK (FULLY SIGNED)
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "Searching for release APK..."
+          find android -type f -name "*.apk" -print
+
+          # Prefer unsigned release if present
+          APK_IN=$(find android -type f -path "*outputs/apk/*release*unsigned*.apk" | head -n 1)
+          if [ -z "$APK_IN" ]; then
+            APK_IN=$(find android -type f -path "*outputs/apk/*release*.apk" ! -name "*-unsigned.apk" | head -n 1)
+          fi
+
+          if [ -z "$APK_IN" ]; then
+            echo "❌ No release APK found."
+            exit 1
+          fi
+
+          echo "✅ Input APK: $APK_IN"
+
+          ZIPALIGN="$ANDROID_SDK_ROOT/build-tools/36.1.0/zipalign"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.1.0/apksigner"
+
+          "$ZIPALIGN" -p -f 4 "$APK_IN" aligned.apk
+
+          "$APKSIGNER" sign \
+            --ks release.keystore \
+            --ks-pass pass:"$KS_PASS" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASS" \
+            --out "Super3-${{ env.TAG }}.apk" \
+            aligned.apk
+
+          echo "✅ Verifying signature..."
+          "$APKSIGNER" verify --verbose "Super3-${{ env.TAG }}.apk"
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag "${{ env.TAG }}"
+          git push origin "${{ env.TAG }}"
+
+      - name: Upload to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Super3 ${{ env.TAG }}
+          files: Super3-${{ env.TAG }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup keystore + temp files (always)
+        if: always()
+        run: |
+          echo "🧹 Cleaning sensitive files..."
+          shred -u release.keystore 2>/dev/null || rm -f release.keystore
+          rm -f aligned.apk
+          rm -f android/init.gradle
+          # Optional: clear gradle caches on runner (not required, but ok)
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper || true
