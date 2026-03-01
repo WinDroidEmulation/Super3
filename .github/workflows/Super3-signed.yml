@@ -106,10 +106,14 @@ jobs:
           echo "AAB=$AAB_PATH" >> $GITHUB_ENV
           echo "aab=$AAB_PATH" >> $GITHUB_OUTPUT
 
-      - name: Download bundletool
+      - name: Download bundletool (stable version)
         run: |
-          curl -L -o bundletool.jar https://github.com/google/bundletool/releases/latest/download/bundletool-all.jar
-          test -s bundletool.jar
+          curl -L -o bundletool.jar \
+            https://github.com/google/bundletool/releases/download/1.15.6/bundletool-all-1.15.6.jar
+
+          echo "Checking bundletool..."
+          file bundletool.jar
+          java -jar bundletool.jar version
 
       - name: Generate SIGNED Universal APK (bundletool)
         env:
