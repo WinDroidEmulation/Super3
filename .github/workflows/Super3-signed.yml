@@ -65,7 +65,12 @@ jobs:
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Build Release
+      - name: Decode keystore (Environment secret)
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > release.keystore
+          test -s release.keystore
+
+      - name: Build Release AAB
         run: |
           cd android
           chmod +x gradlew
@@ -86,50 +91,46 @@ jobs:
           }
           EOF
 
-          ./gradlew -I init.gradle assembleRelease --no-daemon
+          ./gradlew -I init.gradle bundleRelease --no-daemon
 
-      - name: Decode keystore (Environment secret)
+      - name: Locate AAB + Rename
+        id: aab
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > release.keystore
-          test -s release.keystore
+          AAB_PATH=$(find android -type f -path "*outputs/bundle/*release*.aab" | head -n 1)
+          if [ -z "$AAB_PATH" ]; then
+            echo "❌ No .aab found."
+            exit 1
+          fi
+          echo "✅ Found AAB: $AAB_PATH"
+          cp "$AAB_PATH" "Super3-${{ env.TAG }}.aab"
+          echo "AAB=$AAB_PATH" >> $GITHUB_ENV
+          echo "aab=$AAB_PATH" >> $GITHUB_OUTPUT
 
-      - name: Zipalign + Sign APK (FULLY SIGNED)
+      - name: Download bundletool
+        run: |
+          curl -L -o bundletool.jar https://github.com/google/bundletool/releases/latest/download/bundletool-all.jar
+          test -s bundletool.jar
+
+      - name: Generate SIGNED Universal APK (bundletool)
         env:
           KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          echo "Searching for release APK..."
-          find android -type f -name "*.apk" -print
+          java -jar bundletool.jar build-apks \
+            --bundle="${{ env.AAB }}" \
+            --output=app.apks \
+            --mode=universal \
+            --ks=release.keystore \
+            --ks-pass=pass:"$KS_PASS" \
+            --ks-key-alias="$KEY_ALIAS" \
+            --key-pass=pass:"$KEY_PASS"
 
-          # Prefer unsigned release if present
-          APK_IN=$(find android -type f -path "*outputs/apk/*release*unsigned*.apk" | head -n 1)
-          if [ -z "$APK_IN" ]; then
-            APK_IN=$(find android -type f -path "*outputs/apk/*release*.apk" ! -name "*-unsigned.apk" | head -n 1)
-          fi
+          unzip -p app.apks universal.apk > "Super3-${{ env.TAG }}-universal.apk"
 
-          if [ -z "$APK_IN" ]; then
-            echo "❌ No release APK found."
-            exit 1
-          fi
-
-          echo "✅ Input APK: $APK_IN"
-
-          ZIPALIGN="$ANDROID_SDK_ROOT/build-tools/36.1.0/zipalign"
           APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.1.0/apksigner"
-
-          "$ZIPALIGN" -p -f 4 "$APK_IN" aligned.apk
-
-          "$APKSIGNER" sign \
-            --ks release.keystore \
-            --ks-pass pass:"$KS_PASS" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass pass:"$KEY_PASS" \
-            --out "Super3-${{ env.TAG }}.apk" \
-            aligned.apk
-
           echo "✅ Verifying signature..."
-          "$APKSIGNER" verify --verbose "Super3-${{ env.TAG }}.apk"
+          "$APKSIGNER" verify --verbose "Super3-${{ env.TAG }}-universal.apk"
 
       - name: Create Git Tag
         run: |
@@ -138,12 +139,14 @@ jobs:
           git tag "${{ env.TAG }}"
           git push origin "${{ env.TAG }}"
 
-      - name: Upload to Releases
+      - name: Upload to Releases (AAB + Universal APK)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           name: Super3 ${{ env.TAG }}
-          files: Super3-${{ env.TAG }}.apk
+          files: |
+            Super3-${{ env.TAG }}.aab
+            Super3-${{ env.TAG }}-universal.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -152,7 +155,6 @@ jobs:
         run: |
           echo "🧹 Cleaning sensitive files..."
           shred -u release.keystore 2>/dev/null || rm -f release.keystore
-          rm -f aligned.apk
+          rm -f bundletool.jar app.apks
           rm -f android/init.gradle
-          # Optional: clear gradle caches on runner (not required, but ok)
           rm -rf ~/.gradle/caches ~/.gradle/wrapper || true
