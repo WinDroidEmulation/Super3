@@ -22,6 +22,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -36,34 +37,32 @@ jobs:
             "ndk;29.0.14206865" \
             "cmake;3.30.3"
 
-      - name: Get versionName
+      - name: Get versionName (from android/app/build.gradle.kts)
         id: version
         run: |
-          VERSION=$(grep -m1 'versionName' android/app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
-          if [ -z "$VERSION" ]; then
+          VERSION_NAME=$(grep -m1 'versionName[[:space:]]*=' android/app/build.gradle.kts \
+            | sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
+
+          if [ -z "$VERSION_NAME" ]; then
             echo "❌ Could not detect versionName from android/app/build.gradle.kts"
             exit 1
           fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Compute next release tag
-        id: tag
+          TAG="v$VERSION_NAME"
+          echo "VERSION=$VERSION_NAME" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "version=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "✅ Detected versionName: $VERSION_NAME"
+          echo "✅ Release tag: $TAG"
+
+      - name: Fail if tag already exists
         run: |
           git fetch --tags
-          BASE="v${{ env.VERSION }}"
-          LAST=$(git tag -l "${BASE}-r*" | sort -V | tail -n 1)
-
-          if [ -z "$LAST" ]; then
-            R=1
-          else
-            R=$(echo "$LAST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            if [ -z "$R" ]; then R=1; else R=$((R+1)); fi
+          if git rev-parse "${{ env.TAG }}" >/dev/null 2>&1; then
+            echo "❌ Tag already exists: ${{ env.TAG }} (bump versionName in build.gradle.kts)"
+            exit 1
           fi
-
-          TAG="${BASE}-r${R}"
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Decode keystore (Environment secret)
         run: |
@@ -81,6 +80,7 @@ jobs:
           unset JAVA_TOOL_OPTIONS
           unset JAVA_OPTS
 
+          # Force Kotlin compile target to 21 (safety)
           cat > init.gradle <<'EOF'
           gradle.projectsEvaluated {
             allprojects { p ->
@@ -106,16 +106,13 @@ jobs:
           echo "AAB=$AAB_PATH" >> $GITHUB_ENV
           echo "aab=$AAB_PATH" >> $GITHUB_OUTPUT
 
-      - name: Download bundletool (stable version)
+      - name: Download bundletool
         run: |
           curl -L -o bundletool.jar \
             https://github.com/google/bundletool/releases/download/1.15.6/bundletool-all-1.15.6.jar
-
-          echo "Checking bundletool..."
-          file bundletool.jar
           java -jar bundletool.jar version
 
-      - name: Generate SIGNED Universal APK (bundletool)
+      - name: Generate SIGNED Universal APK (AAB → APK)
         env:
           KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
