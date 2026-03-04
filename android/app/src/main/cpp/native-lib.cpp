@@ -204,6 +204,13 @@ static bool IsVonGame(const std::string& name)
   return lower == "von2" || lower == "von254g" || lower == "von2a" || lower == "von2o";
 }
 
+static bool IsStarWarsTrilogyGame(const std::string& name)
+{
+  auto lower = name;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+  return lower == "swtrilgy" || lower == "swtrilgya" || lower == "swtrilgyp";
+}
+
 static void GunToViewCoords(float& x, float& y)
 {
   x = (x - 150.0f) / (651.0f - 150.0f);
@@ -382,6 +389,12 @@ struct Super3Host {
     if (IsVonGame(gameName)) {
       // Force simple shader path for Virtual On 2 variants to avoid GPU hangs.
       config.Set("AndroidSimpleShader", true);
+    }
+
+    if (IsStarWarsTrilogyGame(gameName)) {
+      // Star Wars Trilogy touch/mousepad aim should match finger direction.
+      config.Set("InputAnalogJoyX", "JOY_XAXIS,MOUSE_XAXIS");
+      config.Set("InputAnalogJoyY", "JOY_YAXIS,MOUSE_YAXIS");
     }
   }
 
